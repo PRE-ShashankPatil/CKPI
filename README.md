@@ -1,11 +1,12 @@
 # Handling Large JSON Data with Kafka, Spark Streaming, and Flask API
 
-This guide details how to handle large JSON data (up to 5MB) using Kafka for ingestion, Spark Streaming for processing, and Flask for serving computed KPIs.
+This guide details how to handle large JSON data (up to 5MB) using Kafka for ingestion, Spark Streaming for processing, and Flask for serving computed KPIs. It also includes an approach to fetch data from InfluxDB when the requested data is not available in temporary storage, and an hourly scheduler for KPI computations.
 
 ## Prerequisites
 
 - Apache Kafka and Zookeeper
 - Apache Spark
+- InfluxDB
 - Python environment with necessary libraries
 
 ## Step 1: Kafka Setup
@@ -26,7 +27,7 @@ This guide details how to handle large JSON data (up to 5MB) using Kafka for ing
    - Ensure you have the necessary Python libraries installed.
 
     ```sh
-    pip install pyspark kafka-python
+    pip install pyspark kafka-python influxdb
     ```
 
 2. **Spark Streaming Code**:
@@ -96,7 +97,7 @@ This guide details how to handle large JSON data (up to 5MB) using Kafka for ing
    - Install Flask for the API service.
 
     ```sh
-    pip install Flask
+    pip install Flask influxdb
     ```
 
 2. **API Service Code**:
@@ -106,13 +107,17 @@ This guide details how to handle large JSON data (up to 5MB) using Kafka for ing
     from flask import Flask, jsonify
     import os
     import pandas as pd
+    from influxdb import InfluxDBClient
 
     app = Flask(__name__)
 
     # Define the directory for temporary storage
     temp_dir = "/path/to/temp/directory"
 
-    def get_kpis(timestamp):
+    # InfluxDB client setup
+    influx_client = InfluxDBClient(host='localhost', port=8086, username='yourusername', password='yourpassword', database='yourdatabase')
+
+    def get_kpis_from_temp(timestamp):
         # Define the file path pattern
         file_pattern = os.path.join(temp_dir, f"kpi_*.csv")
         
@@ -128,9 +133,17 @@ This guide details how to handle large JSON data (up to 5MB) using Kafka for ing
         
         return []
 
+    def get_kpis_from_influx(timestamp):
+        query = f"SELECT mean(value) AS average_value FROM your_measurement WHERE time = '{timestamp}' GROUP BY time"
+        result = influx_client.query(query)
+        points = list(result.get_points())
+        return points
+
     @app.route('/kpis/<timestamp>', methods=['GET'])
     def kpis(timestamp):
-        results = get_kpis(timestamp)
+        results = get_kpis_from_temp(timestamp)
+        if not results:
+            results = get_kpis_from_influx(timestamp)
         return jsonify(results)
 
     if __name__ == '__main__':
@@ -167,6 +180,77 @@ To handle large JSON data in Kafka, you might need to adjust the Kafka configura
     producer.send('device-data', large_json)
     ```
 
+## Step 5: Hourly Scheduler for KPI Computations
+
+1. **Install APScheduler**:
+   - Install APScheduler for scheduling tasks.
+
+    ```sh
+    pip install apscheduler
+    ```
+
+2. **Scheduler Code**:
+   - Update `api_service.py` to include an hourly scheduler for KPI computations.
+
+    ```python
+    from flask import Flask, jsonify
+    import os
+    import pandas as pd
+    from influxdb import InfluxDBClient
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    app = Flask(__name__)
+
+    # Define the directory for temporary storage
+    temp_dir = "/path/to/temp/directory"
+
+    # InfluxDB client setup
+    influx_client = InfluxDBClient(host='localhost', port=8086, username='yourusername', password='yourpassword', database='yourdatabase')
+
+    def get_kpis_from_temp(timestamp):
+        # Define the file path pattern
+        file_pattern = os.path.join(temp_dir, f"kpi_*.csv")
+        
+        # List all files in the temporary directory
+        files = [f for f in os.listdir(temp_dir) if f.startswith("kpi_")]
+        
+        # Read the CSV files and filter by timestamp
+        for file in files:
+            df = pd.read_csv(os.path.join(temp_dir, file))
+            filtered_df = df[df['timestamp'] == timestamp]
+            if not filtered_df.empty:
+                return filtered_df.to_dict(orient='records')
+        
+        return []
+
+    def get_kpis_from_influx(timestamp):
+        query = f"SELECT mean(value) AS average_value FROM your_measurement WHERE time = '{timestamp}' GROUP BY time"
+        result = influx_client.query(query)
+        points = list(result.get_points())
+        return points
+
+    @app.route('/kpis/<timestamp>', methods=['GET'])
+    def kpis(timestamp):
+        results = get_kpis_from_temp(timestamp)
+        if not results:
+            results = get_kpis_from_influx(timestamp)
+        return jsonify(results)
+
+    def hourly_kpi_computation():
+        # Implement your KPI computation logic here
+        print("Running hourly KPI computation...")
+
+    if __name__ == '__main__':
+        scheduler = BackgroundScheduler()
+        scheduler.add_job(func=hourly_kpi_computation, trigger="interval", hours=1)
+        scheduler.start()
+        
+        try:
+            app.run(port=5000, debug=True)
+        except (KeyboardInterrupt, SystemExit):
+            scheduler.shutdown()
+    ```
+
 ## Running the Setup
 
 1. **Start Kafka and Zookeeper**:
@@ -194,4 +278,4 @@ To handle large JSON data in Kafka, you might need to adjust the Kafka configura
     curl http://localhost:5000/kpis/2024-07-30T12:00:00Z
     ```
 
-This setup ensures that large JSON data is streamed, processed, and stored efficiently, with quick access to the results through an API. By increasing Kafka's message size limit and using temporary storage for processed results, you can handle large payloads and provide fast access to computed KPIs.
+This setup ensures that large JSON data is streamed, processed, and stored efficiently, with quick access to the results through an API. By increasing Kafka's message size limit and using temporary storage for processed results, you can handle large payloads and provide fast access to computed KPIs. Additionally, the setup includes a fallback mechanism to fetch data from InfluxDB when needed and an hourly scheduler for regular KPI computations.
